@@ -1,0 +1,50 @@
+@echo off
+setlocal
+cd /d "%~dp0"
+
+if not exist bin mkdir bin
+
+echo ========================================================
+echo   Building ATK Tray (Release Standalone Executable)
+echo ========================================================
+
+where g++ >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    echo [Toolchain] Using MinGW GCC/G++ ...
+    windres --codepage 65001 -I res -i res\app.rc -o bin\app.o
+    if errorlevel 1 exit /b 1
+    g++ -O3 -mwindows -municode -s -static src\main.cpp bin\app.o -lsetupapi -lhid -luser32 -lgdi32 -lshell32 -ladvapi32 -o bin\atk-tray.exe
+    if errorlevel 1 exit /b 1
+    if exist bin\app.o del bin\app.o
+    goto done
+)
+
+where cl >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    echo [Toolchain] Using MSVC CL ...
+    rc /c 65001 /fo bin\app.res res\app.rc
+    if errorlevel 1 exit /b 1
+    cl /nologo /O2 /utf-8 /MT /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN src\main.cpp bin\app.res /Fe:bin\atk-tray.exe /link /SUBSYSTEM:WINDOWS setupapi.lib hid.lib user32.lib gdi32.lib shell32.lib advapi32.lib
+    if errorlevel 1 (
+        echo [ERROR] Main program compilation failed.
+        exit /b 1
+    )
+    if exist bin\app.res del bin\app.res
+    if exist main.obj del main.obj
+    goto done
+)
+
+echo [ERROR] Neither g++ nor cl.exe was found in PATH.
+exit /b 1
+
+:done
+if exist bin\atk-tray.exe (
+    echo.
+    echo [SUCCESS] Build completed successfully: bin\atk-tray.exe
+    echo File size:
+    dir bin\atk-tray.exe | findstr atk-tray.exe
+) else (
+    echo.
+    echo [ERROR] Compilation failed.
+    exit /b 1
+)
