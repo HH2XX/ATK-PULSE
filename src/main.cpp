@@ -63,24 +63,16 @@ static volatile LONG g_battery = 100;
 static volatile LONG g_headsetBattery = -1;
 static volatile LONG g_headsetConnected = FALSE;
 static volatile LONG g_headsetCharging = FALSE;
-static volatile LONG g_dpiLevel = 1;
-static volatile LONG g_dpiX = 1200;
-static volatile LONG g_dpiY = 1200;
-#if 0
-
-static WCHAR g_osdTextLine1[64] = L"第 1 档  DPI 1200";
-static WCHAR g_osdTextLine2[64] = L"Battery 100%";
-#endif
+static volatile LONG g_dpiLevel = 0;
+static volatile LONG g_dpiX = 0;
+static volatile LONG g_dpiY = 0;
 static WCHAR g_osdTextLine1[64] = L"ATK Tray";
-static WCHAR g_osdTextLine2[64] = L"Battery 100%";
+static WCHAR g_osdTextLine2[64] = L"DPI --";
 static BYTE g_osdAlpha = 0;
 
 static UINT g_uTaskbarRestartMsg = 0;
 static const WCHAR* RUN_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const WCHAR* APP_NAME = L"ATK-Tray";
-#if 0
-static WCHAR g_detectedModel[64] = L"ATK device";
-#endif
 static WCHAR g_detectedModel[64] = L"ATK device";
 static volatile bool g_deviceConnected = false;
 
@@ -661,13 +653,22 @@ static void UpdateTrayTooltip() {
     const bool mouseConnected = g_deviceConnected;
     const bool headsetConnected = InterlockedCompareExchange(&g_headsetConnected, 0, 0) != FALSE;
     const int headsetBattery = (int)InterlockedCompareExchange(&g_headsetBattery, 0, 0);
+    const int dpiX = (int)InterlockedCompareExchange(&g_dpiX, 0, 0);
+    const int dpiLevel = (int)InterlockedCompareExchange(&g_dpiLevel, 0, 0);
     if (mouseConnected && headsetConnected && headsetBattery >= 0) {
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-            L"ATK Tray\n\u9F20\u6807\u7535\u91CF: %d%%\n\u8033\u673A\u7535\u91CF: %d%%",
-            (int)g_battery, headsetBattery);
+            L"ATK Tray\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: %d (\u7b2c %d \u6863)\n\u8033\u673A\u7535\u91CF: %d%%",
+            (int)g_battery, dpiX > 0 ? dpiX : 0, dpiLevel > 0 ? dpiLevel : 0, headsetBattery);
     } else if (mouseConnected) {
-        StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-            L"ATK Tray\n%s\n\u9F20\u6807\u7535\u91CF: %d%%", g_detectedModel, (int)g_battery);
+        if (dpiX > 0) {
+            StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
+                L"ATK Tray\n%s\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: %d (\u7b2c %d \u6863)",
+                g_detectedModel, (int)g_battery, dpiX, dpiLevel);
+        } else {
+            StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
+                L"ATK Tray\n%s\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: --",
+                g_detectedModel, (int)g_battery);
+        }
     } else if (headsetConnected && headsetBattery >= 0) {
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
             L"ATK Tray\n\u8033\u673A\u7535\u91CF: %d%%", headsetBattery);
@@ -857,18 +858,21 @@ static void LegacyShowOsdNotification(int dpiLevel, int dpiX, int battery) {
 
 #if 1
 static void ShowOsdNotification(int dpiLevel, int dpiX, int battery) {
-    (void)dpiLevel;
-    (void)dpiX;
     if (!g_hOsdWnd) return;
 
-    StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"ATK Tray");
+    if (dpiX > 0) {
+        StringCchPrintfW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1),
+            L"DPI %d  ·  第 %d 档", dpiX, dpiLevel > 0 ? dpiLevel : 1);
+    } else {
+        StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"DPI --");
+    }
     if (g_headsetConnected && g_headsetBattery >= 0) {
         StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
             L"\u9F20\u6807 %d%%  |  \u8033\u673A %d%%%s", battery, (int)g_headsetBattery,
             g_headsetCharging ? L" (\u5145\u7535\u4E2D)" : L"");
     } else {
         StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
-            L"%s  |  \u7535\u91CF: %d%%", g_detectedModel, battery);
+            L"%s  |  \u9F20\u6807\u7535\u91CF: %d%%", g_detectedModel, battery);
     }
 
     RECT rcWork;
@@ -1009,6 +1013,295 @@ static bool FindAtkBatteryPath(WCHAR* outPath, DWORD maxLen, WCHAR* outModel, DW
 
     SetupDiDestroyDeviceInfoList(hDevInfo);
     return found;
+}
+
+static bool FindAtk8KReceiverPath(WCHAR* outPath, DWORD maxLen,
+    WCHAR* outModel, DWORD maxModelLen) {
+    if (!outPath || maxLen == 0) return false;
+    outPath[0] = L'\0';
+    if (outModel && maxModelLen > 0) outModel[0] = L'\0';
+
+    GUID hidGuid;
+    HidD_GetHidGuid(&hidGuid);
+    HDEVINFO hDevInfo = SetupDiGetClassDevsW(&hidGuid, NULL, NULL,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (hDevInfo == INVALID_HANDLE_VALUE) return false;
+
+    SP_DEVICE_INTERFACE_DATA devData = {0};
+    devData.cbSize = sizeof(devData);
+    bool found = false;
+    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &hidGuid, i, &devData); ++i) {
+        DWORD reqSize = 0;
+        SetupDiGetDeviceInterfaceDetailW(hDevInfo, &devData, NULL, 0, &reqSize, NULL);
+        if (reqSize == 0) continue;
+
+        PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail =
+            (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)malloc(reqSize);
+        if (!detail) continue;
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        if (SetupDiGetDeviceInterfaceDetailW(hDevInfo, &devData, detail,
+                reqSize, NULL, NULL)) {
+            WCHAR lowerPath[MAX_PATH] = {0};
+            StringCchCopyW(lowerPath, ARRAYSIZE(lowerPath), detail->DevicePath);
+            _wcslwr_s(lowerPath, ARRAYSIZE(lowerPath));
+            if (wcsstr(lowerPath, L"vid_373b&pid_101b") &&
+                wcsstr(lowerPath, L"col05")) {
+                StringCchCopyW(outPath, maxLen, detail->DevicePath);
+                if (outModel && maxModelLen > 0) {
+                    StringCchCopyW(outModel, maxModelLen, L"ATK Mouse 8K Dongle");
+                    HANDLE hProduct = CreateFileW(detail->DevicePath, GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+                    if (hProduct != INVALID_HANDLE_VALUE) {
+                        WCHAR product[64] = {0};
+                        if (HidD_GetProductString(hProduct, product, sizeof(product))) {
+                            StringCchCopyW(outModel, maxModelLen, product);
+                        }
+                        CloseHandle(hProduct);
+                    }
+                }
+                found = true;
+                free(detail);
+                break;
+            }
+        }
+        free(detail);
+    }
+
+    SetupDiDestroyDeviceInfoList(hDevInfo);
+    return found;
+}
+
+static BYTE Atk8KChecksum(const BYTE* payload) {
+    BYTE sum = 0;
+    for (int i = 0; i < 15; ++i) {
+        sum = (BYTE)(sum + payload[i]);
+    }
+    return (BYTE)(0x55 - (BYTE)(sum + 0x08));
+}
+
+// Send one ATK HUB receiver command and return the 16-byte protocol payload
+// without the Windows HID report-ID byte.
+static bool ReadAtk8KProtocolCommand(const WCHAR* path, BYTE command,
+    WORD eepromAddress, BYTE dataLength, BYTE* outRaw) {
+    if (!path || !path[0] || !outRaw) return false;
+
+    HANDLE hRead = CreateFileW(path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_FLAG_OVERLAPPED, NULL);
+    HANDLE hWrite = CreateFileW(path, GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hRead == INVALID_HANDLE_VALUE || hWrite == INVALID_HANDLE_VALUE) {
+        if (hRead != INVALID_HANDLE_VALUE) CloseHandle(hRead);
+        if (hWrite != INVALID_HANDLE_VALUE) CloseHandle(hWrite);
+        return false;
+    }
+
+    HANDLE readEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!readEvent) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+
+    BYTE response[17] = {0};
+    OVERLAPPED readOverlapped = {0};
+    readOverlapped.hEvent = readEvent;
+    DWORD received = 0;
+    BOOL readStarted = ReadFile(hRead, response, sizeof(response), &received,
+        &readOverlapped);
+    DWORD readError = readStarted ? ERROR_SUCCESS : GetLastError();
+    if (!readStarted && readError != ERROR_IO_PENDING) {
+        CloseHandle(readEvent);
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+
+    BYTE payload[16] = {0};
+    payload[0] = command;
+    payload[2] = (BYTE)((eepromAddress >> 8) & 0xFF);
+    payload[3] = (BYTE)(eepromAddress & 0xFF);
+    payload[4] = dataLength;
+    payload[15] = Atk8KChecksum(payload);
+
+    BYTE request[17] = {0};
+    request[0] = 0x08;
+    memcpy(request + 1, payload, sizeof(payload));
+    if (!HidD_SetOutputReport(hWrite, request, sizeof(request))) {
+        CancelIo(hRead);
+        CloseHandle(readEvent);
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+
+    bool success = false;
+    ULONGLONG deadline = GetTickCount64() + 900;
+    while (GetTickCount64() < deadline) {
+        DWORD remaining = (DWORD)(deadline - GetTickCount64());
+        if (WaitForSingleObject(readEvent, remaining) != WAIT_OBJECT_0) break;
+
+        received = 0;
+        if (GetOverlappedResult(hRead, &readOverlapped, &received, FALSE) &&
+            received >= sizeof(response) && response[0] == 0x08 &&
+            response[1] == command) {
+            memcpy(outRaw, response + 1, 16);
+            success = true;
+            break;
+        }
+
+        ResetEvent(readEvent);
+        ZeroMemory(response, sizeof(response));
+        received = 0;
+        BOOL nextRead = ReadFile(hRead, response, sizeof(response), &received,
+            &readOverlapped);
+        if (!nextRead && GetLastError() != ERROR_IO_PENDING) break;
+    }
+
+    if (!success) CancelIo(hRead);
+    CloseHandle(readEvent);
+    CloseHandle(hRead);
+    CloseHandle(hWrite);
+    return success;
+}
+
+static bool ReadAtk8KReceiverDpi(const WCHAR* path, int* outLevel,
+    int* outDpiX, int* outDpiY) {
+    BYTE config[16] = {0};
+    if (!ReadAtk8KProtocolCommand(path, 0x08, 0, 10, config)) return false;
+
+    // ATK HUB stores the active DPI index at protocol byte 9. The index is
+    // zero-based and selects one of the eight DPI slots.
+    int dpiIndex = (int)config[9];
+    if (dpiIndex < 0 || dpiIndex > 7) return false;
+
+    static const WORD dpiAddresses[4] = {12, 20, 28, 36};
+    BYTE dpiBlock[16] = {0};
+    if (!ReadAtk8KProtocolCommand(path, 0x08,
+            dpiAddresses[dpiIndex / 2], 8, dpiBlock)) {
+        return false;
+    }
+
+    int offset = 5 + (dpiIndex % 2) * 4;
+    int rawX = (int)dpiBlock[offset];
+    int rawY = (int)dpiBlock[offset + 1];
+    int dpiEx = (int)dpiBlock[offset + 2];
+    // ATK's common PAW3395/3950 encoding uses 50-DPI steps and stores the
+    // high two bits for each axis in dpiEx.
+    int encodedX = rawX | ((dpiEx & 0x0C) << 6);
+    int encodedY = rawY | ((dpiEx & 0xC0) << 2);
+    int dpiX = 50 * (encodedX + 1);
+    int dpiY = 50 * (encodedY + 1);
+    if (dpiX <= 0 || dpiX > 50000 || dpiY <= 0 || dpiY > 50000) return false;
+
+    if (outLevel) *outLevel = dpiIndex + 1;
+    if (outDpiX) *outDpiX = dpiX;
+    if (outDpiY) *outDpiY = dpiY;
+    return true;
+}
+
+static bool ReadAtk8KReceiverBattery(const WCHAR* path, int* outBattery) {
+    if (!path || !path[0]) return false;
+
+    HANDLE hRead = CreateFileW(path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_FLAG_OVERLAPPED, NULL);
+    HANDLE hWrite = CreateFileW(path, GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        0, NULL);
+    if (hRead == INVALID_HANDLE_VALUE || hWrite == INVALID_HANDLE_VALUE) {
+        if (hRead != INVALID_HANDLE_VALUE) CloseHandle(hRead);
+        if (hWrite != INVALID_HANDLE_VALUE) CloseHandle(hWrite);
+        return false;
+    }
+
+    HANDLE readEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!readEvent) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+
+    BYTE response[17] = {0};
+    OVERLAPPED readOverlapped = {0};
+    readOverlapped.hEvent = readEvent;
+    DWORD received = 0;
+    BOOL readStarted = ReadFile(hRead, response, sizeof(response), &received,
+        &readOverlapped);
+    DWORD readError = readStarted ? ERROR_SUCCESS : GetLastError();
+    if (!readStarted && readError != ERROR_IO_PENDING) {
+        CloseHandle(readEvent);
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+
+    // ATK HUB first sends DownLoadData (command 1), then requests battery
+    // level (command 4). Both are report 8 with a 16-byte protocol payload.
+    BYTE request[17] = {0};
+    request[0] = 0x08;
+    request[1] = 0x01;
+    request[4] = 0x08;
+    DWORD nonce = GetTickCount();
+    request[5] = (BYTE)(nonce & 0xFF);
+    request[6] = (BYTE)((nonce >> 8) & 0xFF);
+    request[7] = (BYTE)((nonce >> 16) & 0xFF);
+    request[8] = (BYTE)((nonce >> 24) & 0xFF);
+    BYTE checksum = 0;
+    for (int i = 0; i < 16; ++i) checksum = (BYTE)(checksum + request[i]);
+    request[16] = (BYTE)(0x55 - checksum);
+    BOOL discoverySent = HidD_SetOutputReport(hWrite, request, sizeof(request));
+
+    ZeroMemory(request, sizeof(request));
+    request[0] = 0x08;
+    request[1] = 0x04;
+    request[16] = 0x49; // 0x55 - (report id 8 + command 4)
+    BOOL sent = HidD_SetOutputReport(hWrite, request, sizeof(request));
+    if (!discoverySent || !sent) {
+        CancelIo(hRead);
+        CloseHandle(readEvent);
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+
+    bool success = false;
+    ULONGLONG deadline = GetTickCount64() + 1000;
+    while (GetTickCount64() < deadline) {
+        DWORD remaining = (DWORD)(deadline - GetTickCount64());
+        if (WaitForSingleObject(readEvent, remaining) != WAIT_OBJECT_0) break;
+
+        received = 0;
+        if (GetOverlappedResult(hRead, &readOverlapped, &received, FALSE)) {
+            if (received >= 7 && response[0] == 0x08 && response[1] == 0x04) {
+                int battery = (int)response[6];
+                if (battery >= 0 && battery <= 100) {
+                    if (outBattery) *outBattery = battery;
+                    static volatile LONG lastLoggedReceiverBattery = -1;
+                    LONG previous = InterlockedExchange(&lastLoggedReceiverBattery, battery);
+                    if (previous != battery) {
+                        LogMessage(L"ATK 8K receiver battery response: %d%%", battery);
+                    }
+                    success = true;
+                    break;
+                }
+            }
+        }
+
+        ResetEvent(readEvent);
+        ZeroMemory(response, sizeof(response));
+        received = 0;
+        BOOL nextRead = ReadFile(hRead, response, sizeof(response), &received,
+            &readOverlapped);
+        if (!nextRead && GetLastError() != ERROR_IO_PENDING) break;
+    }
+
+    if (!success) CancelIo(hRead);
+
+    CloseHandle(readEvent);
+    CloseHandle(hRead);
+    CloseHandle(hWrite);
+    return success;
 }
 
 static bool ReadAtkBattery(HANDLE hDev, int* outBattery) {
@@ -1329,6 +1622,45 @@ static DWORD WINAPI HidWorkerThread(LPVOID lpParam) {
     LogMessage(L"鼠标轮询线程已启动");
 
     while (WaitForSingleObject(g_hStopEvent, 250) == WAIT_TIMEOUT) {
+        WCHAR receiverPath[MAX_PATH] = {0};
+        WCHAR receiverModel[64] = {0};
+        if (FindAtk8KReceiverPath(receiverPath, ARRAYSIZE(receiverPath),
+                receiverModel, ARRAYSIZE(receiverModel))) {
+            StringCchCopyW(g_detectedModel, ARRAYSIZE(g_detectedModel), receiverModel);
+            g_deviceConnected = true;
+
+            int lastBattery = -1;
+            while (WaitForSingleObject(g_hStopEvent, 0) == WAIT_TIMEOUT) {
+                int battery = 0;
+                if (!ReadAtk8KReceiverBattery(receiverPath, &battery)) break;
+
+                InterlockedExchange(&g_battery, battery);
+                if (battery != lastBattery) {
+                    lastBattery = battery;
+                    PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, (WPARAM)battery, 0);
+                }
+
+                int dpiLevel = 0;
+                int dpiX = 0;
+                int dpiY = 0;
+                if (ReadAtk8KReceiverDpi(receiverPath, &dpiLevel, &dpiX, &dpiY)) {
+                    int oldLevel = (int)InterlockedExchange(&g_dpiLevel, dpiLevel);
+                    int oldDpiX = (int)InterlockedExchange(&g_dpiX, dpiX);
+                    InterlockedExchange(&g_dpiY, dpiY);
+                    if (oldLevel != dpiLevel || oldDpiX != dpiX) {
+                        PostMessageW(g_hMainWnd, WM_APP_DPI_UPDATE,
+                            (WPARAM)dpiLevel, (LPARAM)dpiX);
+                    }
+                }
+
+                if (WaitForSingleObject(g_hStopEvent, 3000) != WAIT_TIMEOUT) break;
+            }
+
+            g_deviceConnected = false;
+            PostMessageW(g_hMainWnd, WM_APP_BAT_UPDATE, (WPARAM)g_battery, 0);
+            continue;
+        }
+
         if (!FindAtkBatteryPath(devPath, ARRAYSIZE(devPath), modelBuf, ARRAYSIZE(modelBuf))) {
             if (g_deviceConnected) {
                 g_deviceConnected = false;
@@ -1453,49 +1785,6 @@ static void LegacyShowContextMenu(HWND hWnd) {
 }
 
 #endif
-static void LegacyShowContextMenu(HWND hWnd) {
-    POINT pt;
-    GetCursorPos(&pt);
-
-    HMENU hMenu = CreatePopupMenu();
-    WCHAR header[96];
-    WCHAR battery[64];
-    WCHAR headset[96];
-    WCHAR dpi[64];
-
-    if (g_deviceConnected) {
-        StringCchPrintfW(header, ARRAYSIZE(header), L"%s", g_detectedModel);
-        StringCchPrintfW(battery, ARRAYSIZE(battery), L"电量：%d%%", g_battery);
-        StringCchCopyW(dpi, ARRAYSIZE(dpi), L"DPI：由 ATK HUB 管理");
-    } else {
-        StringCchCopyW(header, ARRAYSIZE(header), L"ATK Tray（未连接设备）");
-        StringCchCopyW(battery, ARRAYSIZE(battery), L"电量：--");
-        StringCchCopyW(dpi, ARRAYSIZE(dpi), L"DPI：由 ATK HUB 管理");
-    }
-    if (g_headsetConnected && g_headsetBattery >= 0) {
-        StringCchPrintfW(headset, ARRAYSIZE(headset), L"耳机电量：%d%%%s",
-            g_headsetBattery, g_headsetCharging ? L"（充电中）" : L"");
-    } else {
-        StringCchCopyW(headset, ARRAYSIZE(headset), L"耳机电量：--（未连接或被 ATK HUB 占用）");
-    }
-
-    AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_HEADER, header);
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_BATTERY, battery);
-    AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_HEADSET, headset);
-    AppendMenuW(hMenu, MF_STRING | MF_DISABLED, IDM_DPI, dpi);
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-
-    UINT autoRunFlags = MF_STRING | (IsAutoRunEnabled() ? MF_CHECKED : MF_UNCHECKED);
-    AppendMenuW(hMenu, autoRunFlags, IDM_AUTORUN, L"开机自动启动");
-    AppendMenuW(hMenu, MF_STRING, IDM_RECONNECT, L"重新连接设备");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"退出 ATK Tray");
-
-    SetForegroundWindow(hWnd);
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
-    DestroyMenu(hMenu);
-}
 
 static void ShowContextMenu(HWND hWnd) {
     POINT pt;
@@ -1515,7 +1804,12 @@ static void ShowContextMenu(HWND hWnd) {
         StringCchCopyW(header, ARRAYSIZE(header), L"ATK Tray (\u672A\u8FDE\u63A5\u8BBE\u5907)");
         StringCchCopyW(mouseBattery, ARRAYSIZE(mouseBattery), L"\u9F20\u6807\u7535\u91CF: --");
     }
-    StringCchCopyW(dpi, ARRAYSIZE(dpi), L"DPI: \u7531 ATK HUB \u7BA1\u7406");
+    if (g_deviceConnected && g_dpiX > 0) {
+        StringCchPrintfW(dpi, ARRAYSIZE(dpi),
+            L"DPI: %d (\u7b2c %d \u6863)", (int)g_dpiX, (int)g_dpiLevel);
+    } else {
+        StringCchCopyW(dpi, ARRAYSIZE(dpi), L"DPI: --");
+    }
     if (g_headsetConnected && g_headsetBattery >= 0) {
         StringCchPrintfW(headsetBattery, ARRAYSIZE(headsetBattery),
             L"\u8033\u673A\u7535\u91CF: %d%%%s", (int)g_headsetBattery,

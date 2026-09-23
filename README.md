@@ -5,7 +5,7 @@ ATK Tray 是面向 ATK 用户的 Windows 托盘电量显示工具。它在本机
 ## 功能
 
 - 托盘电池图标显示鼠标当前电量，并按电量状态使用绿色、黄色或红色提示。
-- 自动识别 ATK 鼠标，读取 HID Feature Report 中的电量字段。
+- 自动识别 ATK 鼠标；对 ATK Mouse 8K Dongle 使用 ATK HUB 的实时电量查询协议，其他兼容型号读取 HID Feature Report。
 - 支持 ATK N9 Ultra 耳机，通过 ATK HUB 使用的 USB 串口协议读取耳机电量和充电状态。
 - 右键菜单和 OSD 提供中文状态信息、重新连接、开机启动和退出功能。
 - 设备查询在独立线程中运行，耳机查询低频执行，不会抢占 ATK HUB 的串口。
@@ -37,9 +37,11 @@ bin/atk-tray.exe
 
 ### ATK 鼠标
 
-程序会自动寻找 Vendor ID 为 `0x373B`、具有 `COL06` 接口的 HID 设备，并读取 Feature Report ID `0x06`。报告下标 `3` 为电量字段，范围为 `0..100`。
+程序会自动识别 Vendor ID 为 `0x373B` 的 ATK 设备。ATK Mouse 8K Dongle（PID `0x101B`）使用 `COL05` 的输出报告 ID `0x08` 发送实时电量请求，并校验回包中的电量字段；旧型号则读取 `COL06` 的 Feature Report ID `0x06`，报告下标 `3` 为电量字段，范围为 `0..100`。
 
-不同 ATK 型号可能使用不同的 HID 报告结构。如果型号没有 `COL06` 接口，程序会等待并继续扫描，不会修改鼠标配置。
+对于 ATK Mouse 8K Dongle，程序还会直接读取 ATK HUB 使用的 EEPROM 查询协议，获取当前 DPI 档位和对应的 X/Y DPI，不依赖 HUB 界面显示。DPI 读取失败时会保留上一次有效值，不会显示猜测值。
+
+不同 ATK 型号可能使用不同的 HID 报告结构。如果实时协议暂时没有收到有效回包，程序不会把旧的缓存值误报为实时电量，而是继续重试；程序不会修改鼠标配置。
 
 ### ATK N9 Ultra
 

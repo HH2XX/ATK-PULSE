@@ -188,7 +188,7 @@ static void DoInstall() {
     HKEY hKeyUn;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_UNINSTALL, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKeyUn, NULL) == ERROR_SUCCESS) {
         const WCHAR* name = L"ATK Tray";
-        const WCHAR* ver = L"2.0.2";
+        const WCHAR* ver = L"2.0.4";
         const WCHAR* pub = L"ATK Tray Community";
         WCHAR unCmd[MAX_PATH + 32];
         StringCchPrintfW(unCmd, sizeof(unCmd) / sizeof(WCHAR), L"\"%s\" /uninstall", uninstallerPath);
