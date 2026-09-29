@@ -36,8 +36,21 @@ static HFONT g_hFontTitle = NULL;
 static HFONT g_hFontBody = NULL;
 
 static const WCHAR* REG_RUN = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const WCHAR* REG_STARTUP_APPROVED =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 static const WCHAR* REG_UNINSTALL = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ATK-Tray";
 static const WCHAR* APP_NAME = L"ATK-Tray";
+
+static bool ClearStartupApproval() {
+    HKEY hKey = NULL;
+    LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, REG_STARTUP_APPROVED, 0, KEY_SET_VALUE, &hKey);
+    if (st == ERROR_FILE_NOT_FOUND || st == ERROR_PATH_NOT_FOUND) return true;
+    if (st != ERROR_SUCCESS) return false;
+
+    st = RegDeleteValueW(hKey, APP_NAME);
+    RegCloseKey(hKey);
+    return st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND;
+}
 
 // Kill running process by executable name
 static void TerminateAppProcess() {
@@ -171,25 +184,38 @@ static void DoInstall() {
     }
 
     // 7. Configure Run on Startup
-    HKEY hKeyRun;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_RUN, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKeyRun, NULL) == ERROR_SUCCESS) {
+    bool autoRunOk = true;
+    HKEY hKeyRun = NULL;
+    LSTATUS runKeyStatus = RegCreateKeyExW(
+        HKEY_CURRENT_USER, REG_RUN, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKeyRun, NULL);
+    if (runKeyStatus == ERROR_SUCCESS) {
         if (SendMessageW(g_hChkAutoRun, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            WCHAR quotedAppPath[MAX_PATH + 4] = {0};
-            StringCchPrintfW(quotedAppPath, ARRAYSIZE(quotedAppPath), L"\"%s\"", appExePath);
-            RegSetValueExW(hKeyRun, APP_NAME, 0, REG_SZ, (const BYTE*)quotedAppPath,
-                (DWORD)((wcslen(quotedAppPath) + 1) * sizeof(WCHAR)));
+            WCHAR autoRunCommand[MAX_PATH + 32] = {0};
+            HRESULT formatStatus = StringCchPrintfW(
+                autoRunCommand, ARRAYSIZE(autoRunCommand), L"\"%s\" --autorun", appExePath);
+            LSTATUS writeStatus = ERROR_INVALID_DATA;
+            if (SUCCEEDED(formatStatus)) {
+                writeStatus = RegSetValueExW(hKeyRun, APP_NAME, 0, REG_SZ,
+                    (const BYTE*)autoRunCommand,
+                    (DWORD)((wcslen(autoRunCommand) + 1) * sizeof(WCHAR)));
+            }
+            autoRunOk = writeStatus == ERROR_SUCCESS && ClearStartupApproval();
         } else {
-            RegDeleteValueW(hKeyRun, APP_NAME);
+            LSTATUS deleteStatus = RegDeleteValueW(hKeyRun, APP_NAME);
+            autoRunOk = (deleteStatus == ERROR_SUCCESS || deleteStatus == ERROR_FILE_NOT_FOUND) &&
+                ClearStartupApproval();
         }
         RegCloseKey(hKeyRun);
+    } else {
+        autoRunOk = false;
     }
 
     // 8. Register in Windows Add/Remove Programs
     HKEY hKeyUn;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_UNINSTALL, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKeyUn, NULL) == ERROR_SUCCESS) {
-        const WCHAR* name = L"ATK Tray";
-        const WCHAR* ver = L"2.0.4";
-        const WCHAR* pub = L"ATK Tray Community";
+        const WCHAR* name = L"ATK // PULSE";
+        const WCHAR* ver = L"2.1.1";
+        const WCHAR* pub = L"ATK // PULSE Community";
         WCHAR unCmd[MAX_PATH + 32];
         StringCchPrintfW(unCmd, sizeof(unCmd) / sizeof(WCHAR), L"\"%s\" /uninstall", uninstallerPath);
 
@@ -207,7 +233,11 @@ static void DoInstall() {
         ShellExecuteW(NULL, L"open", appExePath, NULL, installDir, SW_SHOWNORMAL);
     }
 
-    MessageBoxW(g_hMainWnd, L"安装完成。", L"提示", MB_ICONINFORMATION | MB_OK);
+    MessageBoxW(g_hMainWnd,
+        autoRunOk
+            ? L"安装完成。"
+            : L"安装完成，但开机自动启动设置失败。请检查安全软件是否拦截。",
+        L"ATK // PULSE", autoRunOk ? MB_ICONINFORMATION | MB_OK : MB_ICONWARNING | MB_OK);
     DestroyWindow(g_hMainWnd);
 }
 
@@ -224,7 +254,7 @@ static void DoUninstall() {
     int res = MessageBoxW(
         NULL,
         L"Uninstall ATK Tray?",
-        L"ATK Tray",
+            L"ATK // PULSE",
         MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2
     );
     if (res != IDYES) return;
@@ -253,6 +283,7 @@ static void DoUninstall() {
         RegDeleteValueW(hKeyRun, APP_NAME);
         RegCloseKey(hKeyRun);
     }
+    ClearStartupApproval();
 
     // 4. Remove Uninstall Key
     RegDeleteKeyW(HKEY_CURRENT_USER, REG_UNINSTALL);
@@ -283,7 +314,7 @@ static LRESULT CALLBACK InstallerWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             g_hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
 
             // Title
-        HWND hTitle = CreateWindowExW(0, L"STATIC", L"ATK Tray Setup", WS_CHILD | WS_VISIBLE, 24, 20, 360, 24, hWnd, NULL, g_hInstance, NULL);
+            HWND hTitle = CreateWindowExW(0, L"STATIC", L"ATK // PULSE Setup", WS_CHILD | WS_VISIBLE, 24, 20, 360, 24, hWnd, NULL, g_hInstance, NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
 
             // Install Path
@@ -393,7 +424,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     g_hMainWnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         wc.lpszClassName,
-        L"ATK Tray Setup",
+        L"ATK // PULSE Setup",
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
         screenX, screenY, winWidth, winHeight,
         NULL, NULL, hInstance, NULL

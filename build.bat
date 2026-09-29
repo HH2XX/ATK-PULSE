@@ -5,7 +5,7 @@ cd /d "%~dp0"
 if not exist bin mkdir bin
 
 echo ========================================================
-echo   Building ATK Tray (Release Standalone Executable)
+echo   Building ATK // PULSE (Release Standalone Executable)
 echo ========================================================
 
 where g++ >nul 2>nul

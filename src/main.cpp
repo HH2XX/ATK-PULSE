@@ -66,12 +66,14 @@ static volatile LONG g_headsetCharging = FALSE;
 static volatile LONG g_dpiLevel = 0;
 static volatile LONG g_dpiX = 0;
 static volatile LONG g_dpiY = 0;
-static WCHAR g_osdTextLine1[64] = L"ATK Tray";
+static WCHAR g_osdTextLine1[64] = L"ATK // PULSE";
 static WCHAR g_osdTextLine2[64] = L"DPI --";
 static BYTE g_osdAlpha = 0;
 
 static UINT g_uTaskbarRestartMsg = 0;
 static const WCHAR* RUN_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const WCHAR* STARTUP_APPROVED_KEY =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 static const WCHAR* APP_NAME = L"ATK-Tray";
 static WCHAR g_detectedModel[64] = L"ATK device";
 static volatile bool g_deviceConnected = false;
@@ -134,7 +136,7 @@ static void UpdateTrayIcon(int battery);
 static void ShowOsdNotification(int dpiLevel, int dpiX, int battery);
 static void UpdateHeadsetState(bool connected, int battery, bool charging);
 static bool IsAutoRunEnabled();
-static void SetAutoRun(bool enable);
+static bool SetAutoRun(bool enable);
 
 // 3x5 font for 16x16: 3 bits per row, 5 rows
 static const uint8_t FONT_3X5[10][5] = {
@@ -505,12 +507,12 @@ static HICON CreateBatteryIcon(int battery) {
     uint32_t* pixels = (uint32_t*)bits;
     memset(pixels, 0, (size_t)size * size * sizeof(uint32_t));
     const bool dark = IsSystemDarkTheme();
-    // Fill the whole cavity by percentage. The fill colors are intentionally
-    // deep and saturated so the white pixel font remains highly legible.
-    const uint32_t frame = dark ? 0xFFFFFFFF : 0xFF111111;
-    const uint32_t cavity = 0xFF101820;
-    const uint32_t fill = battery <= 10 ? 0xFF9B1025
-        : (battery <= 25 ? 0xFF956000 : 0xFF007A3D);
+    // ATK PULSE uses a cyan chassis and a lime charge core. The white value
+    // stays readable on both Windows 10 light and dark taskbars.
+    const uint32_t frame = dark ? 0xFFBCEFFF : 0xFF10222A;
+    const uint32_t cavity = dark ? 0xFF101A20 : 0xFFE8F2F4;
+    const uint32_t fill = battery <= 10 ? 0xFFE34B61
+        : (battery <= 25 ? 0xFFFFB84D : 0xFFB8F34A);
 
     auto put = [&](int x, int y, uint32_t color) {
         if (x >= 0 && x < size && y >= 0 && y < size) pixels[y * size + x] = color;
@@ -521,15 +523,12 @@ static HICON CreateBatteryIcon(int battery) {
         }
     };
 
-    const int tipWidth = size >= 24 ? 3 : 2;
+    // A compact squared pulse mark is intentionally different from the
+    // conventional battery silhouette used by other tray utilities.
     const int bodyLeft = size >= 24 ? 2 : (size >= 20 ? 1 : 0);
-    const int bodyRight = size - tipWidth - 2;
+    const int bodyRight = size - 2;
     const int bodyTop = size >= 24 ? 3 : (size >= 20 ? 2 : 1);
     const int bodyBottom = size - bodyTop - 1;
-    const int tipHeight = size >= 24 ? size / 3 : (size >= 20 ? 7 : 5);
-    const int tipTop = (size - tipHeight) / 2;
-    const int tipLeft = size - tipWidth;
-
     rect(bodyLeft, bodyTop, bodyRight, bodyBottom, frame);
     rect(bodyLeft + 1, bodyTop + 1, bodyRight - 1, bodyBottom - 1, cavity);
 
@@ -543,7 +542,9 @@ static HICON CreateBatteryIcon(int battery) {
     if (fillWidth > 0) {
         rect(innerLeft, innerTop, innerLeft + fillWidth - 1, innerBottom, fill);
     }
-    rect(tipLeft, tipTop, size - 1, tipTop + tipHeight - 1, frame);
+    // The right edge carries a small cyan pulse marker instead of a battery cap.
+    const int markerLeft = bodyRight - (size >= 24 ? 3 : 2);
+    rect(markerLeft, bodyTop + 2, bodyRight - 1, bodyTop + 3, frame);
 
     // Keep the number inside the battery, but draw it as hard 1px pixels.
     // The 3x5 font is deliberately compact: even "100" fits in a 16px icon.
@@ -558,7 +559,7 @@ static HICON CreateBatteryIcon(int battery) {
         ? (innerWidth - textWidth) / 2 : 0);
     const int textTop = innerTop + ((innerBottom - innerTop + 1 - digitHeight) > 0
         ? (innerBottom - innerTop + 1 - digitHeight) / 2 : 0);
-    const uint32_t textColor = 0xFFFFFFFF;
+    const uint32_t textColor = dark ? 0xFFFFFFFF : 0xFF081014;
     int cursor = textLeft;
     for (size_t i = 0; i < strlen(text); ++i) {
         const int digit = text[i] - '0';
@@ -638,14 +639,14 @@ static void LegacyUpdateTrayTooltip() {
     if (g_deviceConnected) {
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
             g_headsetConnected && g_headsetBattery >= 0
-                ? L"ATK Tray\n%s\n鼠标电量：%d%%\n耳机电量：%d%%"
-                : L"ATK Tray\n%s\n鼠标电量：%d%%",
+                ? L"ATK // PULSE\n%s\n鼠标电量：%d%%\n耳机电量：%d%%"
+                : L"ATK // PULSE\n%s\n鼠标电量：%d%%",
             g_detectedModel, g_battery, g_headsetBattery);
     } else if (g_headsetConnected && g_headsetBattery >= 0) {
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-            L"ATK Tray\n耳机电量：%d%%", g_headsetBattery);
+            L"ATK // PULSE\n耳机电量：%d%%", g_headsetBattery);
     } else {
-        StringCchCopyW(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"ATK Tray\n等待 ATK 设备连接...");
+        StringCchCopyW(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"ATK // PULSE\n等待 ATK 设备连接...");
     }
 }
 
@@ -657,24 +658,24 @@ static void UpdateTrayTooltip() {
     const int dpiLevel = (int)InterlockedCompareExchange(&g_dpiLevel, 0, 0);
     if (mouseConnected && headsetConnected && headsetBattery >= 0) {
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-            L"ATK Tray\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: %d (\u7b2c %d \u6863)\n\u8033\u673A\u7535\u91CF: %d%%",
+            L"ATK // PULSE\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: %d (\u7b2c %d \u6863)\n\u8033\u673A\u7535\u91CF: %d%%",
             (int)g_battery, dpiX > 0 ? dpiX : 0, dpiLevel > 0 ? dpiLevel : 0, headsetBattery);
     } else if (mouseConnected) {
         if (dpiX > 0) {
             StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-                L"ATK Tray\n%s\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: %d (\u7b2c %d \u6863)",
+                L"ATK // PULSE\n%s\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: %d (\u7b2c %d \u6863)",
                 g_detectedModel, (int)g_battery, dpiX, dpiLevel);
         } else {
             StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-                L"ATK Tray\n%s\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: --",
+                L"ATK // PULSE\n%s\n\u9F20\u6807\u7535\u91CF: %d%%\nDPI: --",
                 g_detectedModel, (int)g_battery);
         }
     } else if (headsetConnected && headsetBattery >= 0) {
         StringCchPrintfW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-            L"ATK Tray\n\u8033\u673A\u7535\u91CF: %d%%", headsetBattery);
+            L"ATK // PULSE\n\u8033\u673A\u7535\u91CF: %d%%", headsetBattery);
     } else {
         StringCchCopyW(g_nid.szTip, ARRAYSIZE(g_nid.szTip),
-            L"ATK Tray\n\u7B49\u5F85 ATK \u8BBE\u5907\u8FDE\u63A5...");
+            L"ATK // PULSE\n\u7B49\u5F85 ATK \u8BBE\u5907\u8FDE\u63A5...");
     }
 }
 
@@ -717,40 +718,150 @@ static LRESULT CALLBACK OsdWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             FillRect(memDC, &rc, hBrKey);
             DeleteObject(hBrKey);
 
-            // Modern Dark Floating Pill
+            // ATK PULSE status panel: a compact graphite slab with a cyan
+            // status rail and separate battery/DPI data blocks.
             RECT rcBox = rc;
-            InflateRect(&rcBox, -2, -2);
-            HBRUSH hBg = CreateSolidBrush(RGB(24, 26, 32));
-            HPEN hBorder = CreatePen(PS_SOLID, 1, RGB(70, 75, 90));
+            InflateRect(&rcBox, -3, -3);
+            HBRUSH hBg = CreateSolidBrush(RGB(11, 16, 20));
+            HPEN hBorder = CreatePen(PS_SOLID, 1, RGB(53, 72, 79));
             HGDIOBJ oldBr = SelectObject(memDC, hBg);
             HGDIOBJ oldPen = SelectObject(memDC, hBorder);
-            RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 22, 22);
+            RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 18, 18);
+
+            HBRUSH hRail = CreateSolidBrush(RGB(67, 224, 255));
+            RECT rail = {rcBox.left, rcBox.top + 12, rcBox.left + 4, rcBox.bottom - 12};
+            FillRect(memDC, &rail, hRail);
+            DeleteObject(hRail);
 
             SetBkMode(memDC, TRANSPARENT);
 
-            // Level + DPI Value (Prominent Bold Font)
-            HFONT hFontBig = CreateFontW(
-                -24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            HFONT hFontBrand = CreateFontW(
+                -12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI"
+                CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas"
             );
-            HGDIOBJ oldFont = SelectObject(memDC, hFontBig);
-            SetTextColor(memDC, RGB(255, 255, 255));
-            RECT rcTop = rcBox;
-            rcTop.bottom = rcBox.top + 42;
-            DrawTextW(memDC, g_osdTextLine1, -1, &rcTop, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            HGDIOBJ oldFont = SelectObject(memDC, hFontBrand);
+            SetTextColor(memDC, RGB(67, 224, 255));
+            RECT rcBrand = {rcBox.left + 20, rcBox.top + 10, rcBox.left + 180, rcBox.top + 28};
+            DrawTextW(memDC, g_osdTextLine1, -1, &rcBrand, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            // Subtitle (Model + Battery in Cyan)
-            HFONT hFontSub = CreateFontW(
-                -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            HFONT hFontLabel = CreateFontW(
+                -10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI"
             );
-            SelectObject(memDC, hFontSub);
-            SetTextColor(memDC, RGB(130, 215, 255));
-            RECT rcBot = rcBox;
-            rcBot.top = rcBox.top + 40;
-            DrawTextW(memDC, g_osdTextLine2, -1, &rcBot, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(memDC, hFontLabel);
+            SetTextColor(memDC, RGB(137, 157, 164));
+            RECT rcModel = {rcBox.left + 20, rcBox.top + 28, rcBox.left + 300, rcBox.top + 46};
+            DrawTextW(memDC, g_osdTextLine2, -1, &rcModel, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            HFONT hFontValue = CreateFontW(
+                -28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI"
+            );
+            HFONT hFontSmall = CreateFontW(
+                -10, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas"
+            );
+            auto drawBatteryRow = [&](int top, const WCHAR* label, int level,
+                bool connected, bool charging, COLORREF accent) {
+                const int safeLevel = level < 0 ? 0 : (level > 100 ? 100 : level);
+                WCHAR labelText[48] = {0};
+                if (charging) {
+                    StringCchPrintfW(labelText, ARRAYSIZE(labelText), L"%s  /  CHARGING", label);
+                } else if (!connected) {
+                    StringCchPrintfW(labelText, ARRAYSIZE(labelText), L"%s  /  WAITING", label);
+                } else {
+                    StringCchCopyW(labelText, ARRAYSIZE(labelText), label);
+                }
+
+                SelectObject(memDC, hFontSmall);
+                SetTextColor(memDC, accent);
+                RECT rcLabel = {rcBox.left + 22, rcBox.top + top, rcBox.left + 190, rcBox.top + top + 18};
+                DrawTextW(memDC, labelText, -1, &rcLabel,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                // Put the percentage in its own dark cell. This keeps the
+                // value readable even when the charge bar is brightly colored.
+                RECT valueBox = {rcBox.left + 22, rcBox.top + top + 17,
+                    rcBox.left + 112, rcBox.top + top + 49};
+                HBRUSH valueBrush = CreateSolidBrush(RGB(5, 10, 13));
+                HPEN valuePen = CreatePen(PS_SOLID, 1, accent);
+                HGDIOBJ oldValueBrush = SelectObject(memDC, valueBrush);
+                HGDIOBJ oldValuePen = SelectObject(memDC, valuePen);
+                RoundRect(memDC, valueBox.left, valueBox.top,
+                    valueBox.right, valueBox.bottom, 8, 8);
+                SelectObject(memDC, oldValuePen);
+                SelectObject(memDC, oldValueBrush);
+                DeleteObject(valuePen);
+                DeleteObject(valueBrush);
+
+                WCHAR valueText[16] = {0};
+                if (connected && level >= 0) {
+                    StringCchPrintfW(valueText, ARRAYSIZE(valueText), L"%d%%", safeLevel);
+                } else {
+                    StringCchCopyW(valueText, ARRAYSIZE(valueText), L"--");
+                }
+                SelectObject(memDC, hFontValue);
+                SetTextColor(memDC, RGB(255, 255, 255));
+                DrawTextW(memDC, valueText, -1, &valueBox,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                RECT bar = {rcBox.left + 126, rcBox.top + top + 29,
+                    rcBox.left + 302, rcBox.top + top + 40};
+                HBRUSH barBack = CreateSolidBrush(RGB(35, 49, 54));
+                HBRUSH barFillBrush = CreateSolidBrush(accent);
+                HGDIOBJ oldBarBrush = SelectObject(memDC, barBack);
+                HGDIOBJ oldBarPen = SelectObject(memDC, GetStockObject(NULL_PEN));
+                RoundRect(memDC, bar.left, bar.top, bar.right, bar.bottom, 6, 6);
+                if (connected && level >= 0 && safeLevel > 0) {
+                    RECT fill = bar;
+                    fill.right = fill.left + ((bar.right - bar.left) * safeLevel) / 100;
+                    SelectObject(memDC, barFillBrush);
+                    RoundRect(memDC, fill.left, fill.top, fill.right, fill.bottom, 6, 6);
+                }
+                SelectObject(memDC, oldBarPen);
+                SelectObject(memDC, oldBarBrush);
+                DeleteObject(barFillBrush);
+                DeleteObject(barBack);
+            };
+
+            const int mouseBattery = (int)g_battery;
+            const bool headsetConnected = InterlockedCompareExchange(&g_headsetConnected, 0, 0) != FALSE;
+            const int headsetBattery = (int)InterlockedCompareExchange(&g_headsetBattery, -1, -1);
+            const bool headsetCharging = InterlockedCompareExchange(&g_headsetCharging, 0, 0) != FALSE;
+            const COLORREF mouseAccent = mouseBattery <= 10 ? RGB(255, 98, 116)
+                : (mouseBattery <= 25 ? RGB(255, 190, 82) : RGB(184, 243, 74));
+            const COLORREF headsetAccent = headsetConnected
+                ? RGB(67, 224, 255) : RGB(90, 111, 119);
+            drawBatteryRow(48, L"MOUSE POWER", mouseBattery, g_deviceConnected,
+                false, mouseAccent);
+            drawBatteryRow(100, L"HEADSET POWER", headsetBattery, headsetConnected,
+                headsetCharging, headsetAccent);
+
+            HBRUSH hDivider = CreateSolidBrush(RGB(39, 55, 61));
+            RECT divider = {rcBox.left + 320, rcBox.top + 17, rcBox.left + 321, rcBox.bottom - 17};
+            FillRect(memDC, &divider, hDivider);
+            DeleteObject(hDivider);
+
+            SelectObject(memDC, hFontValue);
+            SetTextColor(memDC, RGB(255, 255, 255));
+            WCHAR dpiText[32] = {0};
+            if (g_dpiX > 0) {
+                StringCchPrintfW(dpiText, ARRAYSIZE(dpiText), L"%d", (int)g_dpiX);
+            } else {
+                StringCchCopyW(dpiText, ARRAYSIZE(dpiText), L"--");
+            }
+            RECT rcDpiValue = {rcBox.left + 340, rcBox.top + 42, rcBox.right - 18, rcBox.top + 82};
+            DrawTextW(memDC, dpiText, -1, &rcDpiValue, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(memDC, hFontSmall);
+            SetTextColor(memDC, RGB(137, 157, 164));
+            WCHAR dpiLabel[40] = {0};
+            StringCchPrintfW(dpiLabel, ARRAYSIZE(dpiLabel), L"DPI  /  LEVEL %d", g_dpiLevel > 0 ? (int)g_dpiLevel : 0);
+            RECT rcDpiLabel = {rcBox.left + 342, rcBox.top + 86, rcBox.right - 18, rcBox.top + 106};
+            DrawTextW(memDC, dpiLabel, -1, &rcDpiLabel, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
             BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
 
@@ -760,8 +871,10 @@ static LRESULT CALLBACK OsdWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             SelectObject(memDC, oldBmp);
             DeleteObject(memBmp);
             DeleteDC(memDC);
-            DeleteObject(hFontBig);
-            DeleteObject(hFontSub);
+            DeleteObject(hFontBrand);
+            DeleteObject(hFontLabel);
+            DeleteObject(hFontValue);
+            DeleteObject(hFontSmall);
             DeleteObject(hBorder);
             DeleteObject(hBg);
 
@@ -824,7 +937,7 @@ static void LegacyShowOsdNotification(int dpiLevel, int dpiX, int battery) {
     (void)dpiX;
     if (!g_hOsdWnd) return;
 
-    StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"ATK Tray");
+    StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"ATK // PULSE");
     if (g_headsetConnected && g_headsetBattery >= 0) {
         StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
             L"鼠标 %d%%  |  耳机 %d%%%s", battery, g_headsetBattery,
@@ -841,8 +954,8 @@ static void LegacyShowOsdNotification(int dpiLevel, int dpiX, int battery) {
         rcWork.right = GetSystemMetrics(SM_CXSCREEN);
         rcWork.bottom = GetSystemMetrics(SM_CYSCREEN);
     }
-    const int w = 380;
-    const int h = 76;
+    const int w = 440;
+    const int h = 166;
     const int x = rcWork.left + ((rcWork.right - rcWork.left) - w) / 2;
     const int y = rcWork.bottom - h - 80;
 
@@ -861,10 +974,9 @@ static void ShowOsdNotification(int dpiLevel, int dpiX, int battery) {
     if (!g_hOsdWnd) return;
 
     if (dpiX > 0) {
-        StringCchPrintfW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1),
-            L"DPI %d  ·  第 %d 档", dpiX, dpiLevel > 0 ? dpiLevel : 1);
+        StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"ATK // PULSE");
     } else {
-        StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"DPI --");
+        StringCchCopyW(g_osdTextLine1, ARRAYSIZE(g_osdTextLine1), L"ATK // PULSE");
     }
     if (g_headsetConnected && g_headsetBattery >= 0) {
         StringCchPrintfW(g_osdTextLine2, ARRAYSIZE(g_osdTextLine2),
@@ -882,8 +994,8 @@ static void ShowOsdNotification(int dpiLevel, int dpiX, int battery) {
         rcWork.right = GetSystemMetrics(SM_CXSCREEN);
         rcWork.bottom = GetSystemMetrics(SM_CYSCREEN);
     }
-    const int w = 380;
-    const int h = 76;
+    const int w = 440;
+    const int h = 166;
     const int x = rcWork.left + ((rcWork.right - rcWork.left) - w) / 2;
     const int y = rcWork.bottom - h - 80;
 
@@ -1711,34 +1823,147 @@ static DWORD WINAPI HidWorkerThread(LPVOID lpParam) {
     return 0;
 }
 
-static bool IsAutoRunEnabled() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        WCHAR path[MAX_PATH];
-        DWORD len = sizeof(path);
-        DWORD type = 0;
-        LSTATUS st = RegQueryValueExW(hKey, APP_NAME, NULL, &type, (LPBYTE)path, &len);
-        RegCloseKey(hKey);
-        return (st == ERROR_SUCCESS);
-    }
-    return false;
+static bool GetCurrentExecutablePath(WCHAR* path, size_t pathCount) {
+    if (!path || pathCount == 0) return false;
+    DWORD length = GetModuleFileNameW(NULL, path, (DWORD)pathCount);
+    return length > 0 && length < pathCount;
 }
 
-static void SetAutoRun(bool enable) {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-        if (enable) {
-            WCHAR selfPath[MAX_PATH];
-            GetModuleFileNameW(NULL, selfPath, MAX_PATH);
-            WCHAR quotedPath[MAX_PATH + 4] = {0};
-            StringCchPrintfW(quotedPath, ARRAYSIZE(quotedPath), L"\"%s\"", selfPath);
-            RegSetValueExW(hKey, APP_NAME, 0, REG_SZ, (const BYTE*)quotedPath,
-                (DWORD)((wcslen(quotedPath) + 1) * sizeof(WCHAR)));
-        } else {
-            RegDeleteValueW(hKey, APP_NAME);
-        }
-        RegCloseKey(hKey);
+static bool ExtractExecutablePath(const WCHAR* command, WCHAR* path, size_t pathCount) {
+    if (!command || !path || pathCount == 0) return false;
+
+    while (*command == L' ' || *command == L'\t') ++command;
+    const WCHAR* begin = command;
+    const WCHAR* end = NULL;
+    if (*begin == L'\"') {
+        ++begin;
+        end = wcschr(begin, L'\"');
+    } else {
+        end = begin;
+        while (*end && *end != L' ' && *end != L'\t') ++end;
     }
+
+    if (!end || end == begin || (size_t)(end - begin) >= pathCount) return false;
+    size_t length = (size_t)(end - begin);
+    memcpy(path, begin, length * sizeof(WCHAR));
+    path[length] = L'\0';
+    return true;
+}
+
+static bool IsStartupApproved() {
+    HKEY hKey = NULL;
+    LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0, KEY_READ, &hKey);
+    if (st == ERROR_FILE_NOT_FOUND || st == ERROR_PATH_NOT_FOUND) return true;
+    if (st != ERROR_SUCCESS) return false;
+
+    BYTE state[32] = {0};
+    DWORD stateSize = sizeof(state);
+    DWORD type = 0;
+    st = RegQueryValueExW(hKey, APP_NAME, NULL, &type, state, &stateSize);
+    RegCloseKey(hKey);
+    if (st == ERROR_FILE_NOT_FOUND) return true;
+    if (st != ERROR_SUCCESS || type != REG_BINARY || stateSize == 0) return false;
+
+    // Windows uses 0x03 for a Run entry disabled in Task Manager.
+    return state[0] != 0x03;
+}
+
+static bool ClearStartupApproval() {
+    HKEY hKey = NULL;
+    LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0, KEY_SET_VALUE, &hKey);
+    if (st == ERROR_FILE_NOT_FOUND || st == ERROR_PATH_NOT_FOUND) return true;
+    if (st != ERROR_SUCCESS) return false;
+
+    st = RegDeleteValueW(hKey, APP_NAME);
+    RegCloseKey(hKey);
+    return st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND;
+}
+
+static bool IsAutoRunEnabled() {
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    WCHAR command[MAX_PATH * 2] = {0};
+    DWORD commandSize = sizeof(command);
+    DWORD type = 0;
+    LSTATUS st = RegQueryValueExW(
+        hKey, APP_NAME, NULL, &type, (LPBYTE)command, &commandSize);
+    RegCloseKey(hKey);
+    if (st != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) ||
+        commandSize < sizeof(WCHAR)) {
+        return false;
+    }
+    command[ARRAYSIZE(command) - 1] = L'\0';
+
+    WCHAR expanded[MAX_PATH * 2] = {0};
+    const WCHAR* effectiveCommand = command;
+    if (type == REG_EXPAND_SZ) {
+        DWORD expandedLength = ExpandEnvironmentStringsW(command, expanded, ARRAYSIZE(expanded));
+        if (expandedLength == 0 || expandedLength > ARRAYSIZE(expanded)) return false;
+        effectiveCommand = expanded;
+    }
+
+    WCHAR registeredPath[MAX_PATH] = {0};
+    WCHAR selfPath[MAX_PATH] = {0};
+    if (!ExtractExecutablePath(effectiveCommand, registeredPath, ARRAYSIZE(registeredPath)) ||
+        !GetCurrentExecutablePath(selfPath, ARRAYSIZE(selfPath))) {
+        return false;
+    }
+
+    DWORD attributes = GetFileAttributesW(registeredPath);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        return false;
+    }
+    return _wcsicmp(registeredPath, selfPath) == 0 && IsStartupApproved();
+}
+
+static bool SetAutoRun(bool enable) {
+    HKEY hKey = NULL;
+    LSTATUS st = RegCreateKeyExW(
+        HKEY_CURRENT_USER, RUN_KEY, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE,
+        NULL, &hKey, NULL);
+    if (st != ERROR_SUCCESS) {
+        LogMessage(L"开机启动项注册表打开失败：%ld", st);
+        return false;
+    }
+
+    if (enable) {
+        WCHAR selfPath[MAX_PATH] = {0};
+        WCHAR command[MAX_PATH + 32] = {0};
+        if (!GetCurrentExecutablePath(selfPath, ARRAYSIZE(selfPath)) ||
+            FAILED(StringCchPrintfW(command, ARRAYSIZE(command), L"\"%s\" --autorun", selfPath))) {
+            RegCloseKey(hKey);
+            LogMessage(L"无法获取当前程序路径，开机启动设置失败");
+            return false;
+        }
+
+        st = RegSetValueExW(hKey, APP_NAME, 0, REG_SZ, (const BYTE*)command,
+            (DWORD)((wcslen(command) + 1) * sizeof(WCHAR)));
+        RegCloseKey(hKey);
+        bool approvalCleared = ClearStartupApproval();
+        bool enabled = st == ERROR_SUCCESS && approvalCleared && IsAutoRunEnabled();
+        if (enabled) {
+            LogMessage(L"开机自动启动已启用：%s", command);
+        } else {
+            LogMessage(L"开机自动启动启用失败：注册表=%ld，状态清理=%d",
+                st, approvalCleared ? 1 : 0);
+        }
+        return enabled;
+    }
+
+    st = RegDeleteValueW(hKey, APP_NAME);
+    RegCloseKey(hKey);
+    bool approvalCleared = ClearStartupApproval();
+    bool disabled = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND) && approvalCleared;
+    if (disabled) {
+        LogMessage(L"开机自动启动已关闭");
+    } else {
+        LogMessage(L"开机自动启动关闭失败：注册表=%ld，状态清理=%d",
+            st, approvalCleared ? 1 : 0);
+    }
+    return disabled;
 }
 
 #if 0
@@ -1797,11 +2022,11 @@ static void ShowContextMenu(HWND hWnd) {
     WCHAR headsetBattery[128] = {0};
     WCHAR dpi[64] = {0};
     if (g_deviceConnected) {
-        StringCchCopyW(header, ARRAYSIZE(header), g_detectedModel);
+        StringCchPrintfW(header, ARRAYSIZE(header), L"ATK // PULSE  |  %s", g_detectedModel);
         StringCchPrintfW(mouseBattery, ARRAYSIZE(mouseBattery),
             L"\u9F20\u6807\u7535\u91CF: %d%%", (int)g_battery);
     } else {
-        StringCchCopyW(header, ARRAYSIZE(header), L"ATK Tray (\u672A\u8FDE\u63A5\u8BBE\u5907)");
+        StringCchCopyW(header, ARRAYSIZE(header), L"ATK // PULSE (\u672A\u8FDE\u63A5\u8BBE\u5907)");
         StringCchCopyW(mouseBattery, ARRAYSIZE(mouseBattery), L"\u9F20\u6807\u7535\u91CF: --");
     }
     if (g_deviceConnected && g_dpiX > 0) {
@@ -1829,7 +2054,7 @@ static void ShowContextMenu(HWND hWnd) {
     AppendMenuW(hMenu, autoRunFlags, IDM_AUTORUN, L"\u5F00\u673A\u81EA\u52A8\u542F\u52A8");
     AppendMenuW(hMenu, MF_STRING, IDM_RECONNECT, L"\u91CD\u65B0\u8FDE\u63A5\u8BBE\u5907");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"\u9000\u51FA ATK Tray");
+    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"\u9000\u51FA ATK // PULSE");
 
     SetForegroundWindow(hWnd);
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
@@ -1856,7 +2081,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             switch (wmId) {
                 case IDM_AUTORUN: {
                     bool cur = IsAutoRunEnabled();
-                    SetAutoRun(!cur);
+                    bool target = !cur;
+                    if (!SetAutoRun(target)) {
+                        MessageBoxW(hWnd,
+                            target
+                                ? L"无法启用开机自动启动。请检查安全软件是否拦截，并查看日志。"
+                                : L"无法关闭开机自动启动。请检查安全软件是否拦截，并查看日志。",
+                            L"ATK // PULSE", MB_OK | MB_ICONERROR);
+                    }
                     break;
                 }
                 case IDM_RECONNECT: {
@@ -1928,7 +2160,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     (void)pCmdLine;
     (void)nCmdShow;
     SetUnhandledExceptionFilter(AtkUnhandledExceptionFilter);
-    LogMessage(L"ATK Tray 启动");
+    LogMessage(L"ATK // PULSE 启动");
 
     HANDLE hMutex = CreateMutexW(NULL, TRUE, L"Local\\ATKTraySingleInstance");
     if (!hMutex) {
@@ -1968,7 +2200,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 1;
     }
 
-    g_hMainWnd = CreateWindowExW(0, wc.lpszClassName, L"ATK Tray", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
+    g_hMainWnd = CreateWindowExW(0, wc.lpszClassName, L"ATK // PULSE", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
     if (!g_hMainWnd) {
         LogMessage(L"创建主窗口失败，错误码：%lu", GetLastError());
         CloseHandle(hMutex);
@@ -1992,9 +2224,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     g_hOsdWnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         wcOsd.lpszClassName,
-        L"ATK Tray",
+        L"ATK // PULSE",
         WS_POPUP,
-         0, 0, 380, 76,
+         0, 0, 440, 166,
         NULL, NULL, hInstance, NULL
     );
     if (!g_hOsdWnd) {
@@ -2088,6 +2320,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     }
 
     CloseHandle(hMutex);
-    LogMessage(L"ATK Tray 已退出");
+    LogMessage(L"ATK // PULSE 已退出");
     return (int)msg.wParam;
 }
